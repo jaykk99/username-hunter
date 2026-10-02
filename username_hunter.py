@@ -107,7 +107,8 @@ def check(site, username, timeout, session):
 def main():
     ap = argparse.ArgumentParser(
         description="Find which platforms a username is registered on.")
-    ap.add_argument("username", help="username to hunt for")
+    ap.add_argument("username", nargs="?",
+                    help="username to hunt for")
     ap.add_argument("-t", "--threads", type=int, default=25,
                     help="concurrent requests (default: 25)")
     ap.add_argument("--timeout", type=float, default=10,
@@ -131,6 +132,9 @@ def main():
         cats = sorted({s.get("category", "misc") for s in sites})
         print("Categories: " + ", ".join(cats))
         return
+
+    if not args.username:
+        ap.error("username is required (unless using --list-categories)")
 
     if args.category:
         wanted = {c.strip().lower() for c in args.category.split(",")}

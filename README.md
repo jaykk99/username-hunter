@@ -4,45 +4,57 @@ Type in a username, get back every platform it's registered on. Checks **143 pla
 
 ## Install
 
-### Termux (Android)
+One command, Termux or Linux — installs Python, deps, and the `xname-hunter` command:
 
 ```bash
+curl -sSL https://raw.githubusercontent.com/jaykk99/username-hunter/main/install.sh | bash
+```
+
+Then just run:
+
+```bash
+xname-hunter someuser
+```
+
+Re-run the same command anytime to update to the latest version.
+
+<details>
+<summary>Manual install (no curl pipe)</summary>
+
+```bash
+# Termux
 pkg install -y python git
-git clone https://github.com/jaykk99/username-hunter
-cd username-hunter
+# Linux (Debian/Ubuntu)
+sudo apt-get install -y python3 python3-pip git
+
+git clone https://github.com/jaykk99/username-hunter ~/.xname-hunter
 pip install requests
+sudo ln -sf ~/.xname-hunter/username_hunter.py /usr/local/bin/xname-hunter
 ```
 
-### Linux (one-shot)
-
-```bash
-git clone https://github.com/jaykk99/username-hunter
-cd username-hunter
-chmod +x install.sh
-./install.sh
-```
+</details>
 
 ## Usage
 
 ```bash
 # basic scan
-python3 username_hunter.py someuser
+xname-hunter someuser
 
 # faster (40 threads) and save results
-python3 username_hunter.py someuser -t 40 -o hits.txt
+xname-hunter someuser -t 40 -o hits.txt
 
 # save as JSON or CSV
-python3 username_hunter.py someuser --format json -o hits.json
-python3 username_hunter.py someuser --format csv -o hits.csv
+xname-hunter someuser --format json -o hits.json
+xname-hunter someuser --format csv -o hits.csv
 
 # scan only dev + gaming platforms
-python3 username_hunter.py someuser --category dev,gaming
+xname-hunter someuser --category dev,gaming
 
 # only show hits, skip the misses
-python3 username_hunter.py someuser --quiet
+xname-hunter someuser --quiet
 
 # list all categories
-python3 username_hunter.py --list-categories
+xname-hunter --list-categories
 ```
 
 | Flag | What it does |
