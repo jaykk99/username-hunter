@@ -41,7 +41,7 @@ HEADERS = {
 
 
 def load_sites():
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = os.path.dirname(os.path.realpath(os.path.abspath(__file__)))
     path = os.path.join(here, "sites.json")
     with open(path, encoding="utf-8") as f:
         return json.load(f)["sites"]
