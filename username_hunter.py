@@ -94,6 +94,7 @@ def check(site, username, timeout, session):
             found = r.status_code == 200 and not any(e in body for e in errs)
             if oks:
                 found = found and any(o in body for o in oks)
+            result["found"] = found
         else:
             result["found"] = r.status_code == 200
         if site.get("final_url_contains"):

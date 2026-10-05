@@ -70,6 +70,7 @@ if [ -z "$BIN_DIR" ]; then
 fi
 
 # 5. link the command
+$SUDO mkdir -p "$BIN_DIR"
 $SUDO ln -sf "$INSTALL_DIR/username_hunter.py" "$BIN_DIR/xname-hunter"
 
 echo "[+] done."
