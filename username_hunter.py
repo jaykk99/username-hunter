@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -38,6 +39,20 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
 }
+
+# requests.Session is not thread-safe: a session shared across the worker
+# pool corrupts responses (crossed connections, stale cookies) and drops
+# real hits. Each thread gets its own session instead.
+_tls = threading.local()
+
+
+def _thread_session():
+    sess = getattr(_tls, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        sess.headers.update(HEADERS)
+        _tls.session = sess
+    return sess
 
 
 def load_sites():
@@ -59,7 +74,8 @@ def _resolve_json_key(data, dotted):
     return node
 
 
-def check(site, username, timeout, session):
+def check(site, username, timeout, session=None):
+    session = _thread_session()
     name = site["name"]
     profile_url = site["url"].format(username)
     result = {
@@ -151,13 +167,11 @@ def main():
     print(f"{CYAN}[*]{RESET} Hunting {YELLOW}{username}{RESET} "
           f"across {total} platforms ({args.threads} threads)...\n")
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
     found, done = [], 0
     start = time.time()
 
     with ThreadPoolExecutor(max_workers=args.threads) as pool:
-        futures = {pool.submit(check, s, username, args.timeout, session): s
+        futures = {pool.submit(check, s, username, args.timeout): s
                    for s in sites}
         for fut in as_completed(futures):
             res = fut.result()
