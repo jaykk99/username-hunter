@@ -16,8 +16,11 @@ Results are informational (public data only). Always verify hits manually.
 """
 
 import argparse
+import datetime
+import html
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -39,6 +42,22 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
 }
+
+PROFILES_DIR = os.path.expanduser("~/.xname-hunter")
+PROFILES_PATH = os.path.join(PROFILES_DIR, "profiles.json")
+
+# Soft-404 guard: some sites answer HTTP 200 for a missing user but render a
+# "not found" page. The <title> of a real profile almost never contains these,
+# so a title hit flips a code-type 200 back to not-found.
+SOFT404_TITLE_MARKERS = [
+    "page not found",
+    "user not found",
+    "profile not found",
+    "account not found",
+    "404 not found",
+    "this page doesn't exist",
+    "doesn't exist",
+]
 
 # requests.Session is not thread-safe: a session shared across the worker
 # pool corrupts responses (crossed connections, stale cookies) and drops
@@ -74,7 +93,20 @@ def _resolve_json_key(data, dotted):
     return node
 
 
-def check(site, username, timeout, session=None):
+def _page_title(html_text):
+    m = re.search(r"<title[^>]*>(.*?)</title\s*>", html_text or "",
+                  re.IGNORECASE | re.DOTALL)
+    if not m:
+        return ""
+    return re.sub(r"\s+", " ", m.group(1)).strip().lower()
+
+
+def _looks_like_soft404(body):
+    title = _page_title(body)
+    return any(marker in title for marker in SOFT404_TITLE_MARKERS)
+
+
+def check(site, username, timeout, retries=2, retry_delay=1.0, delay=0.0):
     session = _thread_session()
     name = site["name"]
     profile_url = site["url"].format(username)
@@ -87,13 +119,27 @@ def check(site, username, timeout, session=None):
     }
     try:
         url = site["api"].format(username) if site.get("api") else profile_url
-        r = session.get(url, headers=HEADERS, timeout=timeout,
-                        allow_redirects=True)
+        r = None
+        for attempt in range(max(retries, 0) + 1):
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                r = session.get(url, headers=HEADERS, timeout=timeout,
+                                allow_redirects=True)
+                break
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt >= retries:
+                    raise
+                time.sleep(retry_delay * (2 ** attempt))
         result["status"] = r.status_code
         ctype = site.get("type", "code")
 
         if ctype == "code":
             result["found"] = r.status_code == 200
+            # Soft-404 guard: 200 with a "not found" page title is a miss.
+            if result["found"] and _looks_like_soft404(r.text[:4000]):
+                result["found"] = False
+                result["soft404"] = True
         elif ctype == "api":
             found = r.status_code == 200
             if found and site.get("json_key"):
@@ -121,6 +167,70 @@ def check(site, username, timeout, session=None):
     return result
 
 
+def load_profiles():
+    try:
+        with open(PROFILES_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_profile(name, config):
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    profiles = load_profiles()
+    profiles[name] = config
+    with open(PROFILES_PATH, "w", encoding="utf-8") as f:
+        json.dump(profiles, f, indent=2)
+
+
+def write_html_report(found, username, path, elapsed, total):
+    """Self-contained HTML report of a scan: hits table + summary."""
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    rows = "\n".join(
+        "      <tr><td>{}</td><td>{}</td><td><a href=\"{}\">{}</a></td><td>{}</td></tr>".format(
+            html.escape(r["name"]), html.escape(r["category"]),
+            html.escape(r["url"]), html.escape(r["url"]),
+            html.escape(str(r.get("status", ""))))
+        for r in sorted(found, key=lambda r: r["name"].lower())
+    )
+    doc = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>username-hunter report: {user}</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0;
+         margin: 0; padding: 24px; }}
+  main {{ max-width: 900px; margin: 0 auto; }}
+  h1 {{ color: #fff; }}
+  .meta {{ color: #94a3b8; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
+  th, td {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid #334155; }}
+  th {{ color: #94a3b8; font-weight: 600; }}
+  a {{ color: #22d3ee; word-break: break-all; }}
+  .none {{ color: #94a3b8; margin-top: 16px; }}
+</style>
+</head>
+<body>
+<main>
+  <h1>username-hunter: {user}</h1>
+  <p class="meta">{found} of {total} platforms matched &middot; scanned in {elapsed:.1f}s &middot; {now}</p>
+  {table}
+  <p class="meta">Public data only. Verify hits manually before acting on them.</p>
+</main>
+</body>
+</html>""".format(
+        user=html.escape(username), found=len(found), total=total,
+        elapsed=elapsed, now=now,
+        table=("<table><tr><th>Platform</th><th>Category</th><th>Profile URL</th>"
+               "<th>Status</th></tr>\n" + rows + "\n    </table>")
+        if found else '<p class="none">No matches found.</p>')
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(doc)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Find which platforms a username is registered on.")
@@ -137,13 +247,45 @@ def main():
                     help="list available categories and exit")
     ap.add_argument("-o", "--output",
                     help="write found results to file")
-    ap.add_argument("--format", choices=["txt", "json", "csv"], default="txt",
+    ap.add_argument("--format", choices=["txt", "json", "csv", "html"], default="txt",
                     help="output file format (default: txt)")
+    ap.add_argument("--retries", type=int, default=2,
+                    help="retries on connection errors/timeouts (default: 2)")
+    ap.add_argument("--retry-delay", type=float, default=1.0,
+                    help="base seconds between retries, doubled each time (default: 1.0)")
+    ap.add_argument("--min-delay", type=float, default=0.0,
+                    help="minimum seconds to wait before each request, per thread "
+                         "(default: 0 — raise this if sites rate-limit you)")
+    ap.add_argument("--save-profile", metavar="NAME",
+                    help="save this scan's settings as a named profile and exit")
+    ap.add_argument("--profile", metavar="NAME",
+                    help="load scan settings from a saved profile")
+    ap.add_argument("--list-profiles", action="store_true",
+                    help="list saved scan profiles and exit")
     ap.add_argument("--quiet", action="store_true",
                     help="only print found usernames, no misses")
+    # Parse once just to find --profile, then apply the profile as parser
+    # defaults so explicit CLI flags still win over profile values.
+    early = ap.parse_known_args()[0]
+    if early.profile:
+        profiles = load_profiles()
+        cfg = profiles.get(early.profile)
+        if not cfg:
+            sys.exit(f"No profile named '{early.profile}'.")
+        ap.set_defaults(**{k: v for k, v in cfg.items()})
+        print(f"{CYAN}[*]{RESET} Loaded profile '{early.profile}'.")
     args = ap.parse_args()
 
     sites = load_sites()
+
+    if args.list_profiles:
+        profiles = load_profiles()
+        if not profiles:
+            print("No saved profiles.")
+        else:
+            for name, cfg in sorted(profiles.items()):
+                print(f"{name}: {json.dumps(cfg)}")
+        return
 
     if args.list_categories:
         cats = sorted({s.get("category", "misc") for s in sites})
@@ -159,6 +301,20 @@ def main():
         if not sites:
             sys.exit("No sites match those categories.")
 
+    if args.save_profile:
+        save_profile(args.save_profile, {
+            "threads": args.threads,
+            "timeout": args.timeout,
+            "category": args.category,
+            "format": args.format,
+            "retries": args.retries,
+            "retry_delay": args.retry_delay,
+            "min_delay": args.min_delay,
+            "quiet": args.quiet,
+        })
+        print(f"{CYAN}[*]{RESET} Saved profile '{args.save_profile}'.")
+        return
+
     username = args.username.strip().lstrip("@")
     if not username:
         sys.exit("Empty username.")
@@ -171,7 +327,9 @@ def main():
     start = time.time()
 
     with ThreadPoolExecutor(max_workers=args.threads) as pool:
-        futures = {pool.submit(check, s, username, args.timeout): s
+        futures = {pool.submit(check, s, username, args.timeout,
+                              args.retries, args.retry_delay,
+                              args.min_delay): s
                    for s in sites}
         for fut in as_completed(futures):
             res = fut.result()
@@ -197,6 +355,8 @@ def main():
                 f.write("platform,category,url,status\n")
                 for r in found:
                     f.write(f"{r['name']},{r['category']},{r['url']},{r['status']}\n")
+        elif args.format == "html":
+            write_html_report(found, username, args.output, elapsed, total)
         else:
             with open(args.output, "w", encoding="utf-8") as f:
                 for r in found:

@@ -166,6 +166,7 @@
     {"name": "Contra", "category": "misc", "url": "https://contra.com/{}", "type": "code"},
     {"name": "OnlyFans", "category": "misc", "url": "https://onlyfans.com/{}", "type": "code"},
     {"name": "Fansly", "category": "misc", "url": "https://fansly.com/{}", "type": "code"},
-    {"name": "Chaturbate", "category": "misc", "url": "https://chaturbate.com/{}/", "type": "code"}
+    {"name": "Chaturbate", "category": "misc", "url": "https://chaturbate.com/{}/", "type": "code"},
+    {"name": "dev.to", "category": "dev", "url": "https://dev.to/{}", "type": "code"}
   ]
 }
