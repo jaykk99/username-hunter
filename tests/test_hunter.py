@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for username_hunter. All network access is mocked."""
+import csv
 import io
 import json
 import os
@@ -216,6 +217,97 @@ class HtmlReportTests(unittest.TestCase):
             uh.write_html_report([], "nobody", path, elapsed=0.5, total=144)
             doc = open(path, encoding="utf-8").read()
         self.assertIn("No matches found", doc)
+
+
+class InputValidationTests(unittest.TestCase):
+    def _main_with_argv(self, argv):
+        with patch.object(sys, "argv", ["username_hunter.py"] + argv):
+            return uh.main()
+
+    def test_threads_zero_rejected(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._main_with_argv(["bob", "-t", "0"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_threads_negative_rejected(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._main_with_argv(["bob", "-t", "-3"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_negative_timeout_rejected(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._main_with_argv(["bob", "--timeout", "-5"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_negative_retry_delay_rejected(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._main_with_argv(["bob", "--retry-delay", "-1"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_negative_min_delay_rejected(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._main_with_argv(["bob", "--min-delay", "-0.5"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_save_profile_without_username(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_path = os.path.join(tmp, "profiles.json")
+            with patch.object(uh, "PROFILES_DIR", tmp), \
+                    patch.object(uh, "PROFILES_PATH", fake_path):
+                self._main_with_argv(["--save-profile", "quick", "-t", "40"])
+                profiles = uh.load_profiles()
+        self.assertEqual(profiles["quick"]["threads"], 40)
+
+
+class UrlEncodingTests(unittest.TestCase):
+    def setUp(self):
+        if hasattr(uh._tls, "session"):
+            del uh._tls.session
+
+    def _check(self, site_cfg, username, response=None):
+        sess = MagicMock()
+        sess.get.return_value = response or FakeResponse(200, text="<title>x</title>")
+        with patch.object(uh, "_thread_session", return_value=sess):
+            res = uh.check(site_cfg, username, timeout=5)
+        return res, sess.get.call_args[0][0]
+
+    def test_username_percent_encoded_in_profile_url(self):
+        _, url = self._check(site(), "a/b?c=d")
+        self.assertEqual(url, "https://example.com/u/a%2Fb%3Fc%3Dd")
+
+    def test_username_percent_encoded_in_api_url(self):
+        cfg = site(type="api", api="https://example.com/api/{}")
+        _, url = self._check(cfg, "a/b")
+        self.assertEqual(url, "https://example.com/api/a%2Fb")
+
+    def test_plain_username_unchanged(self):
+        _, url = self._check(site(), "bob")
+        self.assertEqual(url, "https://example.com/u/bob")
+
+    def test_final_url_contains_uses_encoded_username(self):
+        cfg = site(final_url_contains="example.com/u/{}")
+        res, _ = self._check(
+            cfg, "a/b",
+            FakeResponse(200, url="https://example.com/u/a%2Fb",
+                         text="<title>x</title>"))
+        self.assertTrue(res["found"])
+
+    def test_csv_output_quotes_commas(self):
+        found = {"name": "Weird, Site", "category": "dev",
+                 "url": "https://example.com/u/bob", "status": 200,
+                 "found": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "r.csv")
+            argv = ["bob", "--format", "csv", "-o", out, "--quiet"]
+            with patch.object(uh, "load_sites", return_value=[site()]), \
+                    patch.object(uh, "check", return_value=found), \
+                    patch.object(sys, "argv", ["username_hunter.py"] + argv):
+                uh.main()
+            with open(out, encoding="utf-8", newline="") as f:
+                rows = list(csv.reader(f))
+        self.assertEqual(rows[0], ["platform", "category", "url", "status"])
+        self.assertEqual(rows[1],
+                         ["Weird, Site", "dev", "https://example.com/u/bob", "200"])
 
 
 if __name__ == "__main__":

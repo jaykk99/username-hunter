@@ -16,6 +16,7 @@ Results are informational (public data only). Always verify hits manually.
 """
 
 import argparse
+import csv
 import datetime
 import html
 import json
@@ -25,6 +26,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
 
 try:
     import requests
@@ -77,8 +79,14 @@ def _thread_session():
 def load_sites():
     here = os.path.dirname(os.path.realpath(os.path.abspath(__file__)))
     path = os.path.join(here, "sites.json")
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)["sites"]
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"Could not read sites.json: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("sites"), list):
+        sys.exit("sites.json is missing the 'sites' list.")
+    return data["sites"]
 
 
 def _resolve_json_key(data, dotted):
@@ -109,7 +117,14 @@ def _looks_like_soft404(body):
 def check(site, username, timeout, retries=2, retry_delay=1.0, delay=0.0):
     session = _thread_session()
     name = site["name"]
-    profile_url = site["url"].format(username)
+    # Percent-encode the username for URLs: a raw "/" "?" or "#" in the
+    # input would otherwise rewrite the request path, query or fragment
+    # (e.g. "a/b" fetched /u/a/b, "a?x=1" injected a query string).
+    # Unreserved characters (letters, digits, _ . - ~) pass through
+    # unchanged, so normal usernames are unaffected. success_strings below
+    # still match against the raw username, since page bodies show it raw.
+    enc_username = quote(username, safe="")
+    profile_url = site["url"].format(enc_username)
     result = {
         "name": name,
         "category": site.get("category", "misc"),
@@ -118,7 +133,7 @@ def check(site, username, timeout, retries=2, retry_delay=1.0, delay=0.0):
         "status": None,
     }
     try:
-        url = site["api"].format(username) if site.get("api") else profile_url
+        url = site["api"].format(enc_username) if site.get("api") else profile_url
         r = None
         for attempt in range(max(retries, 0) + 1):
             if delay > 0:
@@ -160,7 +175,7 @@ def check(site, username, timeout, retries=2, retry_delay=1.0, delay=0.0):
         else:
             result["found"] = r.status_code == 200
         if site.get("final_url_contains"):
-            needle = site["final_url_contains"].format(username).lower()
+            needle = site["final_url_contains"].format(enc_username).lower()
             result["found"] = result["found"] and needle in r.url.lower()
     except Exception as exc:
         result["error"] = str(exc)[:90]
@@ -292,16 +307,8 @@ def main():
         print("Categories: " + ", ".join(cats))
         return
 
-    if not args.username:
-        ap.error("username is required (unless using --list-categories)")
-
-    if args.category:
-        wanted = {c.strip().lower() for c in args.category.split(",")}
-        sites = [s for s in sites if s.get("category", "misc") in wanted]
-        if not sites:
-            sys.exit("No sites match those categories.")
-
     if args.save_profile:
+        # Saving a profile needs no username: it only stores settings.
         save_profile(args.save_profile, {
             "threads": args.threads,
             "timeout": args.timeout,
@@ -314,6 +321,30 @@ def main():
         })
         print(f"{CYAN}[*]{RESET} Saved profile '{args.save_profile}'.")
         return
+
+    if not args.username:
+        ap.error("username is required (unless using --list-categories)")
+
+    # Reject meaningless numbers up front instead of crashing mid-scan
+    # (ThreadPoolExecutor raises ValueError on -t 0) or silently failing
+    # every request (requests raises ValueError on a negative timeout,
+    # which check() records as an error and the scan reports "0 found").
+    if args.threads < 1:
+        ap.error("--threads must be at least 1")
+    if args.timeout <= 0:
+        ap.error("--timeout must be greater than 0")
+    if args.retries < 0:
+        ap.error("--retries must be at least 0")
+    if args.retry_delay < 0:
+        ap.error("--retry-delay must be at least 0")
+    if args.min_delay < 0:
+        ap.error("--min-delay must be at least 0")
+
+    if args.category:
+        wanted = {c.strip().lower() for c in args.category.split(",")}
+        sites = [s for s in sites if s.get("category", "misc") in wanted]
+        if not sites:
+            sys.exit("No sites match those categories.")
 
     username = args.username.strip().lstrip("@")
     if not username:
@@ -351,10 +382,12 @@ def main():
             with open(args.output, "w", encoding="utf-8") as f:
                 json.dump(found, f, indent=2)
         elif args.format == "csv":
-            with open(args.output, "w", encoding="utf-8") as f:
-                f.write("platform,category,url,status\n")
+            with open(args.output, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["platform", "category", "url", "status"])
                 for r in found:
-                    f.write(f"{r['name']},{r['category']},{r['url']},{r['status']}\n")
+                    writer.writerow([r["name"], r["category"], r["url"],
+                                     r["status"]])
         elif args.format == "html":
             write_html_report(found, username, args.output, elapsed, total)
         else:
